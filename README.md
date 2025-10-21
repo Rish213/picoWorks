@@ -8,10 +8,10 @@ It’s currently in Phase 1 (Simulation & SDK Testing) and evolving toward full 
 # Project Structure
 picoWorks/
 │
-├── core/          # SDK, control logic, and computer vision modules
-├── simulator/     # Hardware-independent simulation & data emulation
-├── ui/            # Streamlit-based testing dashboard
-├── server/        # FastAPI backend bridging SDK <-> UI
-├── tests/         # Integration tests
-├── logs/          # Auto-generated telemetry logs
-└── requirements.txt
+├── core/          # SDK, control logic, and computer vision modules  
+├── simulator/     # Hardware-independent simulation & data emulation  
+├── ui/            # Streamlit-based testing dashboard  
+├── server/        # FastAPI backend bridging SDK <-> UI  
+├── tests/         # Integration tests  
+├── logs/          # Auto-generated telemetry logs  
+└── requirements.txt  
