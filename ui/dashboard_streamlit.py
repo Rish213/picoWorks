@@ -1,78 +1,88 @@
 import streamlit as st
 import requests
 import time
-import random
 
-st.set_page_config(page_title="picoLink GCS", layout="wide")
-st.title("🛰️ picoLink Ground Control")
+API_BASE = "http://127.0.0.1:8000"
+st.set_page_config(page_title="picoLink Ground Control", layout="wide")
 
-if 'connected' not in st.session_state:
-    st.session_state['connected'] = False
+st.title("🧠 picoLink Ground Control")
 
-API_URL = "http://127.0.0.1:8000"
+# --- Session State ---
+if "connected" not in st.session_state:
+    st.session_state.connected = False
+if "last_telemetry" not in st.session_state:
+    st.session_state.last_telemetry = {}
 
-if not st.session_state['connected']:
-    st.info("System Disconnected. Press 'Connect' to start.")
-    if st.button("Connect"):
+# --- Sidebar (Telemetry Log) ---
+st.sidebar.title("Telemetry Log")
+telemetry_log = st.sidebar.empty()
+
+# --- Connection Section ---
+status_placeholder = st.empty()
+
+if not st.session_state.connected:
+    connect_btn = st.button("🔌 Connect")
+    if connect_btn:
         try:
-            response = requests.post(f"{API_URL}/connect")
-            response.raise_for_status()
-            data = response.json()
-            if data.get("status") == "success":
-                st.session_state['connected'] = True
-                st.rerun()
-        except requests.exceptions.RequestException as e:
-            st.error(f"Failed to connect: {e}")
-
-else:
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.success("✅ Connected. Streaming telemetry...")
-    with col2:
-        if st.button("Disconnect", use_container_width=True):
-            try:
-                requests.post(f"{API_URL}/disconnect")
-                st.session_state['connected'] = False
-                st.rerun()
-            except requests.exceptions.RequestException as e:
-                st.error(f"Failed: {e}")
-
-    st.markdown("---")
-
-    telemetry_placeholder = st.empty()
-
-    st.subheader("🎮 Actions")
-    c1, c2, c3 = st.columns(3)
-
-    def send_command(cmd):
-        try:
-            requests.post(f"{API_URL}/command", json={"command": cmd})
-            st.toast(f"Command `{cmd}` sent!", icon="✅")
+            res = requests.post(f"{API_BASE}/connect")
+            if res.status_code == 200:
+                st.session_state.connected = True
+                st.success("✅ Connected to PicoSDK")
+            else:
+                st.error("❌ Connection failed.")
         except Exception as e:
-            st.error(e)
-
-    if c1.button("Arm", use_container_width=True):
-        send_command("ARM")
-    if c2.button("Calibrate IMU", use_container_width=True):
-        send_command("CALIBRATE_IMU")
-    if c3.button("Reset", use_container_width=True):
-        send_command("RESET")
-
-    while True:
+            st.error(f"Connection error: {e}")
+else:
+    disconnect_btn = st.button("❌ Disconnect")
+    if disconnect_btn:
         try:
-            response = requests.get(f"{API_URL}/telemetry")
-            response.raise_for_status()
-            data = response.json()
+            res = requests.post(f"{API_BASE}/disconnect")
+            if res.status_code == 200:
+                st.session_state.connected = False
+                st.warning("🔌 Disconnected.")
+            else:
+                st.error("❌ Disconnection failed.")
+        except Exception as e:
+            st.error(f"Disconnection error: {e}")
 
-            with telemetry_placeholder.container():
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Roll", f"{data['roll']:.2f}°", f"{random.uniform(-0.3, 0.3):+.2f}")
-                col2.metric("Pitch", f"{data['pitch']:.2f}°", f"{random.uniform(-0.3, 0.3):+.2f}")
-                col3.metric("Yaw", f"{data['yaw']:.2f}°")
-                col4.metric("Battery", f"{data['batt']:.2f}V")
+# --- Command Buttons ---
+st.subheader("Commands")
+col1, col2, col3 = st.columns(3)
+if st.session_state.connected:
+    with col1:
+        if st.button("ARM"):
+            requests.post(f"{API_BASE}/command", json={"command": "ARM"})
+    with col2:
+        if st.button("CALIBRATE_IMU"):
+            requests.post(f"{API_BASE}/command", json={"command": "CALIBRATE_IMU"})
+    with col3:
+        if st.button("RESET"):
+            requests.post(f"{API_BASE}/command", json={"command": "RESET"})
+
+# --- Telemetry Display ---
+st.subheader("Telemetry")
+cols = st.columns(4)
+col_labels = ["Altitude (m)", "Battery (V)", "Temperature (°C)", "Motor RPM"]
+
+# --- Live Telemetry Update ---
+if st.session_state.connected:
+    placeholder_vals = [c.empty() for c in cols]
+
+    while st.session_state.connected:
+        try:
+            telemetry = requests.get(f"{API_BASE}/telemetry").json()
+            st.session_state.last_telemetry = telemetry
+            telemetry_log.write(telemetry)
+
+            # Display telemetry numerically
+            placeholder_vals[0].metric(label="Altitude (m)", value=f"{telemetry['altitude']:.2f}")
+            placeholder_vals[1].metric(label="Battery (V)", value=f"{telemetry['battery']:.2f}")
+            placeholder_vals[2].metric(label="Temperature (°C)", value=f"{telemetry['temperature']:.1f}")
+            placeholder_vals[3].metric(label="Motor RPM", value=f"{sum(telemetry['motor_rpm'])//4}")
 
             time.sleep(0.5)
-        except requests.exceptions.RequestException:
-            st.error("Lost backend connection.")
-            st.session_state['connected'] = False
-            st.rerun()
+        except Exception as e:
+            st.error(f"Telemetry error: {e}")
+            break
+else:
+    st.info("Connect to start telemetry stream.")
