@@ -11,6 +11,10 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.transforms as transforms
 import matplotlib.pyplot as plt
+from PySide6.QtGui import QImage, QPixmap
+from ui.vision_bridge import VisionQtBridge
+import cv2
+
 
 # ---------------------------------
 # CLASS 1: UPGRADED HUD WIDGET
@@ -314,22 +318,61 @@ class MainWindow(QMainWindow):
         
     @Slot()
     def toggle_connection(self):
-        """Starts or stops the fake telemetry timer."""
+        """Start/stop live vision + (keeps existing fake telemetry capability)."""
         if not self.is_connected:
+        # start vision bridge
+            video_source = "rtsp://10.82.234.8:1945/"  # change to your phone/ESP32 URL or 0 for local webcam
+            onnx_model = "core/yolov11n.onnx"  # path relative to project root; change if different
+            self.vision = VisionQtBridge(video_source, onnx_path=onnx_model, conf=0.25)
+            self.vision.frame_ready.connect(self.update_camera_view)
+            self.vision.detection_ready.connect(lambda dets, ts: self.messages.add_message(f"[{datetime.now().strftime('%H:%M:%S')}] Det: {len(dets)}"))
+            self.vision.start()
+
+        # (optionally) keep fake telemetry running for HUD demo
             self.dev_timer.start()
+
             self.is_connected = True
             self.btn_connect.setText("DISCONNECT")
             self.btn_connect.setObjectName("DisconnectButton")
-            self.messages.add_message(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Fake telemetry stream started.")
+            self.messages.add_message(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Live vision started.")
         else:
+        # stop vision
+            try:
+                if hasattr(self, 'vision') and self.vision:
+                    self.vision.stop()
+                self.vision = None
+            except Exception as e:
+                print(f"Error stopping vision: {e}")
+
+        # stop fake telemetry (optional)
             self.dev_timer.stop()
+
             self.is_connected = False
             self.btn_connect.setText("CONNECT")
             self.btn_connect.setObjectName("ConnectButton")
-            self.messages.add_message(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Fake telemetry stream stopped.")
-        
-        # Re-apply stylesheet to update button color
+            self.messages.add_message(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Live vision stopped.")
+
+    # refresh stylesheet for button color
         self.apply_stylesheet()
+
+    @Slot(object, float)
+    def update_camera_view(self, frame, fps_ts):
+        """
+        Receive BGR numpy frame from bridge, convert and display in QLabel.
+        We scale to fit the placeholder.
+        """
+        try:
+            # Convert BGR->RGB for Qt
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            bytes_per_line = ch * w
+            qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            pix = QPixmap.fromImage(qimg)
+            self.camera_placeholder.setPixmap(pix.scaled(
+                self.camera_placeholder.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        except Exception as e:
+            print(f"[update_camera_view] error: {e}")
+
     
     @Slot()
     def _update_fake_telemetry(self):
