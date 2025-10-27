@@ -1,465 +1,365 @@
 import sys
-import io
-import traceback
-from functools import partial
-
-import requests
-from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QPixmap, QFont
+import numpy as np
+import random
+from datetime import datetime
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QGroupBox, QTextEdit, QCheckBox, QSizePolicy, QMessageBox
+    QPushButton, QLabel, QGroupBox, QTextEdit, QFrame, QSizePolicy
 )
-
-# Matplotlib imports for Qt embedding
-from matplotlib.figure import Figure
+from PySide6.QtCore import Qt, QTimer, Slot
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-import numpy as np
-import math
-import time
-import random
+from matplotlib.figure import Figure
+import matplotlib.transforms as transforms
+import matplotlib.pyplot as plt
 
-# ---------------------------
-# HUD Widget (Matplotlib canvas)
-# ---------------------------
+# ---------------------------------
+# CLASS 1: UPGRADED HUD WIDGET
+# This is a high-performance HUD that is much faster and looks better.
+# ---------------------------------
 class HUDWidget(QWidget):
-    def __init__(self, parent=None, width=4, height=3, dpi=100):
-        super().__init__(parent)
-        self.figure = Figure(figsize=(width, height), dpi=dpi)
+    def __init__(self):
+        super().__init__()
+        
+        # Remove figsize and set transparent facecolor for the figure
+        self.figure = Figure(facecolor='#1a1a1a') # Changed to '#1a1a1a'
         self.canvas = FigureCanvas(self.figure)
         self.ax = self.figure.add_subplot(111)
-        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        layout = QVBoxLayout()
+        self.figure.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.canvas)
-        self.setLayout(layout)
 
-        # initial draw
         self.roll = 0.0
         self.pitch = 0.0
         self.yaw = 0.0
-        self._draw_horizon(self.roll, self.pitch)
 
-    def _draw_horizon(self, roll, pitch):
-        """
-        Simple artificial horizon:
-        - draws a circle bezel
-        - draws a horizon line rotated by roll
-        - pitch shifts the line up/down
-        """
-        self.ax.clear()
-        self.ax.set_aspect('equal')
-        self.ax.set_xlim(-1.2, 1.2)
-        self.ax.set_ylim(-1.2, 1.2)
+        self.init_hud()
+
+    def init_hud(self):
+        """Create all Matplotlib artists once."""
+        # Removed self.ax.set_aspect('equal')
+        # Removed self.ax.set_xlim(-30, 30)
+        # Removed self.ax.set_ylim(-30, 30)
         self.ax.axis('off')
+        # Set axes facecolor to transparent
+        self.ax.set_facecolor('#1a1a1a') # Changed to '#1a1a1a'
 
-        # bezel circle
-        theta = np.linspace(0, 2 * np.pi, 200)
-        x_c = np.cos(theta)
-        y_c = np.sin(theta)
-        self.ax.plot(x_c, y_c, linewidth=2, color='white', alpha=0.9)
+        # Create sky and ground patches
+        # Use large values for coordinates to always fill the view
+        # The key is that these shapes are much larger than any expected view
+        self.sky = plt.Rectangle((-1000, 0), 2000, 1000, color='#3079a8', zorder=0)
+        self.ground = plt.Rectangle((-1000, -1000), 2000, 1000, color='#6b8c5a', zorder=0)
+        self.ax.add_patch(self.sky)
+        self.ax.add_patch(self.ground)
+        
+        # Create horizon line
+        self.horizon_line = plt.Line2D([-1000, 1000], [0, 0], color='white', lw=2, zorder=1)
+        self.ax.add_line(self.horizon_line)
 
-        # compute horizon line (pitch moves up/down; roll rotates)
-        pitch_norm = max(min(pitch / 45.0, 1.0), -1.0)
-        base_y = -pitch_norm
-        x_line = np.linspace(-2, 2, 10)
-        y_line = np.ones_like(x_line) * base_y
-        angle_rad = math.radians(roll)
-        x_rot = x_line * math.cos(angle_rad) - y_line * math.sin(angle_rad)
-        y_rot = x_line * math.sin(angle_rad) + y_line * math.cos(angle_rad)
+        # Create static aircraft symbol
+        # The coordinates here are relative to the *center of the view*, not the world.
+        # So these should remain small and centered.
+        self.aircraft_symbol_lines = [ # Renamed for clarity
+            plt.Line2D([-5, 0, 5], [-5, 0, -5], color='red', lw=2, zorder=10), # The 'V'
+            plt.Line2D([-15, -7], [0, 0], color='red', lw=2, zorder=10),    # Left wing
+            plt.Line2D([7, 15], [0, 0], color='red', lw=2, zorder=10)      # Right wing
+        ]
+        for line in self.aircraft_symbol_lines: # Use new name
+            self.ax.add_line(line)
 
-        # sky and ground fill
-        upper_poly_x = np.concatenate([x_rot, x_rot[::-1]])
-        upper_poly_y = np.concatenate([y_rot, np.ones_like(y_rot) * 2])
-        lower_poly_x = np.concatenate([x_rot, x_rot[::-1]])
-        lower_poly_y = np.concatenate([y_rot, np.ones_like(y_rot) * -2])
+    def update_hud(self, roll, pitch, yaw):
+        """Update the transforms of existing artists (fast)."""
+        self.roll = roll
+        self.pitch = pitch
+        self.yaw = yaw
+        
+        # We need to set the view limits dynamically or based on desired pitch range
+        # Let's say we want to show +/- 30 degrees vertically for pitch display
+        # and proportional horizontal view.
+        view_height = 60 # total vertical view range
+        view_width = view_height * (self.width() / self.height()) # Adjust width based on actual widget aspect ratio
 
-        self.ax.fill(upper_poly_x, upper_poly_y, color='#3b82f6', alpha=0.45)
-        self.ax.fill(lower_poly_x, lower_poly_y, color='#b45309', alpha=0.45)
-        self.ax.plot(x_rot, y_rot, color='white', linewidth=2)
+        self.ax.set_xlim(-view_width/2, view_width/2)
+        self.ax.set_ylim(-view_height/2, view_height/2)
+        
+        # Normalize pitch for translation. We'll show +/- 30 degrees max.
+        pitch_display_range = 30.0 # How many degrees of pitch to map to the full viewport
+        pitch_norm = max(min(pitch, pitch_display_range), -pitch_display_range)
 
-        self.ax.text(0, -0.95, f"Roll: {roll:.1f}°  Pitch: {pitch:.1f}°  Yaw: {self.yaw:.1f}°",
-                     ha='center', va='center', color='white', fontsize=9)
+        # Create the transformation
+        # We rotate by -roll and translate by -pitch (so world moves)
+        transform = transforms.Affine2D().rotate_deg(-roll).translate(0, -pitch_norm) + self.ax.transData
+        
+        # Apply transform to dynamic elements
+        self.sky.set_transform(transform)
+        self.ground.set_transform(transform)
+        self.horizon_line.set_transform(transform)
 
         self.canvas.draw_idle()
 
-    def update_hud(self, roll, pitch, yaw):
-        """Public method to update the HUD graphics."""
-        try:
-            self.roll = roll
-            self.pitch = pitch
-            self.yaw = yaw
-            self._draw_horizon(roll, pitch)
-        except Exception:
-            traceback.print_exc()
+
+# ---------------------------------
+# CLASS 2: MESSAGES WIDGET
+# (No changes needed, it's well-designed)
+# ---------------------------------
+class MessagesWidget(QGroupBox):
+    def __init__(self):
+        super().__init__("Messages")
+        layout = QVBoxLayout()
+        self.text_box = QTextEdit()
+        self.text_box.setReadOnly(True)
+        layout.addWidget(self.text_box)
+        self.setLayout(layout)
+
+    def add_message(self, msg):
+        self.text_box.append(msg)
+        self.text_box.verticalScrollBar().setValue(self.text_box.verticalScrollBar().maximum())
 
 
-# ---------------------------
-# Network Worker Thread (now fetches image bytes)
-# ---------------------------
-class TelemetryWorker(QThread):
-    telemetry_received = Signal(dict)
-    error = Signal(str)
+# ---------------------------------
+# CLASS 3: COMMANDS WIDGET
+# (No changes needed, it's well-designed)
+# ---------------------------------
+class CommandsWidget(QGroupBox):
+    def __init__(self):
+        super().__init__("Controls")
+        layout = QGridLayout()
+        self.buttons = {}
+        names = ["CALIBRATE", "ARM", "RESET", "DISARM"]
+        for i, name in enumerate(names):
+            btn = QPushButton(name)
+            # Removed setFixedHeight for responsiveness
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            btn.setMaximumHeight(35)
+            btn.setMaximumWidth(150)
+            layout.addWidget(btn, i // 2, i % 2)
+            self.buttons[name] = btn
+        self.setLayout(layout)
 
-    def __init__(self, telemetry_url="http://127.0.0.1:8000/telemetry", poll_interval=0.3, parent=None):
-        super().__init__(parent)
-        self.telemetry_url = telemetry_url
-        self.poll_interval = poll_interval
-        self._running = False
+# ---------------------------------
+# NEW CLASS: TELEMETRY WIDGET
+# A dedicated, clean widget for numeric data
+# ---------------------------------
+class TelemetryWidget(QGroupBox):
+    def __init__(self):
+        super().__init__("Telemetry")
+        self.value_labels = {}
+        layout = QGridLayout()
 
-    def run(self):
-        self._running = True
-        while self._running:
-            try:
-                resp = requests.get(self.telemetry_url, timeout=1.0)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if not isinstance(data, dict):
-                        data = {"error": "bad telemetry format"}
+        # Create labels
+        metrics = ["Roll", "Pitch", "Yaw", "Battery", "Altitude", "Signal"]
+        for i, name in enumerate(metrics):
+            name_label = QLabel(name)
+            value_label = QLabel("0.0")
+            layout.addWidget(name_label, i // 2, i % 2, Qt.AlignLeft)
+            layout.addWidget(value_label, i // 2, i % 2, Qt.AlignRight)
+            self.value_labels[name] = value_label
+        
+        self.setLayout(layout)
 
-                    # If telemetry contains a video URL, fetch the image bytes here (in worker thread)
-                    video_url = data.get("video_frame_url")
-                    if video_url:
-                        try:
-                            r_img = requests.get(video_url, timeout=1.0)
-                            if r_img.status_code == 200:
-                                data["video_frame_bytes"] = r_img.content
-                            else:
-                                # Attach None or skip; emit an info error
-                                data["video_frame_bytes"] = None
-                                self.error.emit(f"image http {r_img.status_code}")
-                        except Exception as e_img:
-                            data["video_frame_bytes"] = None
-                            # Emit an error but keep telemetry flowing
-                            self.error.emit(f"image fetch error: {e_img}")
-
-                    self.telemetry_received.emit(data)
-                else:
-                    self.error.emit(f"telemetry http {resp.status_code}")
-            except Exception as e:
-                # emit an error string for UI to show in messages
-                self.error.emit(str(e))
-
-            # poll interval wait loop (non-blocking check)
-            t0 = time.time()
-            while self._running and (time.time() - t0) < self.poll_interval:
-                time.sleep(0.01)
-
-    def stop(self):
-        self._running = False
-        self.quit()
-        self.wait(timeout=2000)
+    def update_data(self, data):
+        """Updates all telemetry labels from a data dictionary."""
+        self.value_labels["Roll"].setText(f"{data.get('roll', 0.0):.1f}°")
+        self.value_labels["Pitch"].setText(f"{data.get('pitch', 0.0):.1f}°")
+        self.value_labels["Yaw"].setText(f"{data.get('yaw', 0.0):.1f}°")
+        self.value_labels["Battery"].setText(f"{data.get('battery', 0.0):.1f}%")
+        self.value_labels["Altitude"].setText(f"{data.get('altitude', 0.0):.1f} m")
+        self.value_labels["Signal"].setText(f"{data.get('signal', 0)}%")
 
 
-# ---------------------------
-# Main Window
-# ---------------------------
+# ---------------------------------
+# CLASS 4: MAIN WINDOW (Refactored)
+# ---------------------------------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("picoWorks - GCS (Desktop)")
-        self.resize(1200, 720)
-        self._connected = False
-        self.worker = None
+        self.resize(1400, 800) # Use resize for initial, not fixed
+        
+        self.is_connected = False
+        
+        # --- Create Fake Telemetry Timer ---
+        self.dev_timer = QTimer(self)
+        self.dev_timer.setInterval(100) # 100ms = 10Hz update rate
+        self.dev_timer.timeout.connect(self._update_fake_telemetry)
 
-        # Apply dark stylesheet
+        self.init_ui()
         self.apply_stylesheet()
 
-        # Central widget
+    def init_ui(self):
+        """Create and assemble all UI components."""
         central = QWidget()
-        main_v = QVBoxLayout(central)
-        main_v.setContentsMargins(12, 12, 12, 12)
-        main_v.setSpacing(12)
-
-        # Top navigation
-        nav_widget = QWidget()
-        nav_layout = QHBoxLayout(nav_widget)
-        nav_layout.setContentsMargins(6, 6, 6, 6)
-        nav_layout.setSpacing(8)
-
-        # Left nav buttons
-        self.home_btn = QPushButton("HOME")
-        self.help_btn = QPushButton("HELP")
-        for b in (self.home_btn, self.help_btn):
-            b.setCursor(Qt.PointingHandCursor)
-            b.setFixedHeight(36)
-            b.setStyleSheet("font-weight:600;")
-
-        nav_layout.addWidget(self.home_btn)
-        nav_layout.addWidget(self.help_btn)
-
-        nav_layout.addStretch(1)
-
-        # Right connect button
-        self.connect_btn = QPushButton("CONNECT")
-        self.connect_btn.setFixedHeight(36)
-        self.update_connect_button_style()
-        self.connect_btn.clicked.connect(self.toggle_connection)
-        nav_layout.addWidget(self.connect_btn)
-
-        main_v.addWidget(nav_widget)
-
-        # Main split area
-        split_widget = QWidget()
-        split_layout = QHBoxLayout(split_widget)
-        split_layout.setContentsMargins(0, 0, 0, 0)
-        split_layout.setSpacing(12)
-
-        # ---------- Left Column ----------
-        left_col = QVBoxLayout()
-        left_col.setSpacing(12)
-
-        # Camera Group
-        cam_group = QGroupBox("Camera")
-        cam_group.setStyleSheet("QGroupBox { font-weight:700; }")
-        cam_layout = QVBoxLayout()
-        cam_layout.setContentsMargins(8, 8, 8, 8)
-        cam_layout.setSpacing(6)
-        self.detect_checkbox = QCheckBox("Detection")
-        self.detect_checkbox.setCursor(Qt.PointingHandCursor)
-        self.video_label = QLabel()
-        # Removed fixed size to make it responsive
-        self.video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.video_label.setStyleSheet("background: #0f0f0f; border: 1px solid #333;")
-        self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setText("No Video")
-        cam_layout.addWidget(self.detect_checkbox)
-        cam_layout.addWidget(self.video_label, alignment=Qt.AlignCenter)
-        cam_group.setLayout(cam_layout)
-        left_col.addWidget(cam_group)
-
-        # Messages Group
-        msg_group = QGroupBox("Messages")
-        msg_group.setStyleSheet("QGroupBox { font-weight:700; }")
-        msg_layout = QVBoxLayout()
-        msg_layout.setContentsMargins(8, 8, 8, 8)
-        self.messages_edit = QTextEdit()
-        self.messages_edit.setReadOnly(True)
-        self.messages_edit.setFixedHeight(200)
-        self.messages_edit.setStyleSheet("background: #121212;")
-        msg_layout.addWidget(self.messages_edit)
-        msg_group.setLayout(msg_layout)
-        left_col.addWidget(msg_group, stretch=1)
-
-        split_layout.addLayout(left_col, stretch=3)
-
-        # ---------- Right Column ----------
-        right_col = QVBoxLayout()
-        right_col.setSpacing(12)
-
-        # HUD Group
-        hud_group = QGroupBox("HUD")
-        hud_layout = QVBoxLayout()
-        hud_layout.setContentsMargins(8, 8, 8, 8)
-        self.hud_widget = HUDWidget(width=4, height=3, dpi=110)
-        # Telemetry numeric label
-        self.telemetry_label = QLabel("#Pitch: 0.0, Roll: 0.0, Yaw: 0.0, Battery: 0%")
-        self.telemetry_label.setFont(QFont("Monospace", 10))
-        self.telemetry_label.setStyleSheet("color: white;")
-        hud_layout.addWidget(self.hud_widget)
-        hud_layout.addWidget(self.telemetry_label, alignment=Qt.AlignCenter)
-        hud_group.setLayout(hud_layout)
-        right_col.addWidget(hud_group, stretch=2)
-
-        # Controls Group (grid 2x2)
-        ctrl_group = QGroupBox("Controls")
-        ctrl_layout = QGridLayout()
-        ctrl_layout.setSpacing(8)
-        self.calibrate_btn = QPushButton("CALIBRATE")
-        self.arm_btn = QPushButton("ARM")
-        self.reset_btn = QPushButton("RESET")
-        self.disarm_btn = QPushButton("DISARM")
-        for btn in (self.calibrate_btn, self.arm_btn, self.reset_btn, self.disarm_btn):
-            btn.setFixedHeight(48)
-            btn.setCursor(Qt.PointingHandCursor)
-        ctrl_layout.addWidget(self.calibrate_btn, 0, 0)
-        ctrl_layout.addWidget(self.arm_btn, 0, 1)
-        ctrl_layout.addWidget(self.reset_btn, 1, 0)
-        ctrl_layout.addWidget(self.disarm_btn, 1, 1)
-        ctrl_group.setLayout(ctrl_layout)
-        right_col.addWidget(ctrl_group)
-
-        split_layout.addLayout(right_col, stretch=2)
-
-        main_v.addWidget(split_widget)
-
         self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
 
-        # Connect control buttons to send_command
-        self.calibrate_btn.clicked.connect(partial(self.send_command, "CALIBRATE"))
-        self.arm_btn.clicked.connect(partial(self.send_command, "ARM"))
-        self.reset_btn.clicked.connect(partial(self.send_command, "RESET"))
-        self.disarm_btn.clicked.connect(partial(self.send_command, "DISARM"))
-        self.home_btn.clicked.connect(self.on_home_clicked)
-        self.help_btn.clicked.connect(self.on_help_clicked)
+        # ----- Top bar -----
+        top_bar = QHBoxLayout()
+        btn_home = QPushButton("HOME")
+        btn_help = QPushButton("HELP")
+        self.btn_connect = QPushButton("CONNECT")
+        
+        top_bar.addWidget(btn_home)
+        top_bar.addWidget(btn_help)
+        top_bar.addStretch()
+        top_bar.addWidget(self.btn_connect)
+        
+        # Connect signals
+        self.btn_connect.clicked.connect(self.toggle_connection)
+
+        main_layout.addLayout(top_bar)
+
+        # ----- Center layout (camera + right column) -----
+        center_layout = QHBoxLayout()
+
+        # Left side (Camera + Messages)
+        left_col = QVBoxLayout()
+        camera_box = QGroupBox("Camera")
+        camera_layout = QVBoxLayout()
+        self.camera_placeholder = QLabel("Camera Feed Placeholder")
+        self.camera_placeholder.setAlignment(Qt.AlignCenter)
+        self.camera_placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding) # Makes it responsive
+        camera_layout.addWidget(self.camera_placeholder)
+        camera_box.setLayout(camera_layout)
+        left_col.addWidget(camera_box, 3) # 3 stretch factor
+
+        self.messages = MessagesWidget()
+        left_col.addWidget(self.messages, 1) # 1 stretch factor
+
+        # Right side (HUD + Telemetry + Controls)
+        right_col = QVBoxLayout()
+        self.hud = HUDWidget()
+        self.hud.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding) # Makes it responsive
+        hud_box = QGroupBox("HUD")
+        hud_layout = QVBoxLayout()
+        hud_layout.addWidget(self.hud)
+        hud_box.setLayout(hud_layout)
+
+        self.telemetry = TelemetryWidget() # Use new telemetry widget
+        self.commands = CommandsWidget()
+
+        right_col.addWidget(hud_box, 2) # 2 stretch factor
+        right_col.addWidget(self.telemetry, 1) # 1 stretch factor
+        right_col.addWidget(self.commands, 1) # 1 stretch factor
+
+        center_layout.addLayout(left_col, 2) # Left col is 2/3 of width
+        center_layout.addLayout(right_col, 1) # Right col is 1/3 of width
+
+        main_layout.addLayout(center_layout)
 
     def apply_stylesheet(self):
-        style = """
-        QMainWindow { background: #1a1a1a; color: white; }
-        QGroupBox { background: #2b2b2b; color: white; border-radius: 6px; padding: 6px; }
-        QPushButton { background: #2b2b2b; color: white; border: 1px solid #3a3a3a; border-radius: 6px; padding: 6px; }
-        QPushButton:hover { border-color: #5a5a5a; }
-        QTextEdit { color: white; }
-        QLabel { color: white; }
-        QCheckBox { color: white; }
-        """
-        self.setStyleSheet(style)
-
-    def update_connect_button_style(self):
-        if self._connected:
-            self.connect_btn.setText("DISCONNECT")
-            self.connect_btn.setStyleSheet("background: #8b1a1a; color: white; font-weight:700;")
-        else:
-            self.connect_btn.setText("CONNECT")
-            self.connect_btn.setStyleSheet("background: #1a8b3a; color: white; font-weight:700;")
-
-    def on_home_clicked(self):
-        QMessageBox.information(self, "HOME", "Home pressed (TODO).")
-
-    def on_help_clicked(self):
-        QMessageBox.information(self, "HELP", "Help pressed (TODO).")
-
+        """A single, clean stylesheet for the whole app."""
+        self.setStyleSheet("""
+            QMainWindow, QWidget { 
+                background-color: #1a1a1a; 
+            }
+            QGroupBox {
+                background-color: #2b2b2b;
+                color: white;
+                border: 1px solid #3a3a3a;
+                border-radius: 8px;
+                margin-top: 10px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 5px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: -5px 10px 0 10px;
+            }
+            QLabel { 
+                color: #e0e0e0; 
+                font-size: 13px;
+            }
+            QTextEdit {
+                background-color: #1a1a1a;
+                color: #00ff00; /* Green console text */
+                border: 1px solid #3a3a3a;
+                border-radius: 5px;
+                font-family: 'Courier New', monospace;
+            }
+            QPushButton {
+                background-color: #444;
+                color: white;
+                border: 1px solid #555;
+                border-radius: 6px;
+                padding: 8px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #555;
+            }
+            QPushButton:pressed {
+                background-color: #333;
+            }
+            /* Special style for CONNECT button */
+            #ConnectButton {
+                background-color: #2ECC71; /* Green */
+            }
+            #ConnectButton:hover {
+                background-color: #27ae60;
+            }
+            /* Special style for DISCONNECT button */
+            #DisconnectButton {
+                background-color: #E74C3C; /* Red */
+            }
+            #DisconnectButton:hover {
+                background-color: #c0392b;
+            }
+        """)
+        # Apply object names for special styling
+        self.btn_connect.setObjectName("ConnectButton")
+        
+    @Slot()
     def toggle_connection(self):
-        if not self._connected:
-            # call backend connect endpoint
-            try:
-                resp = requests.post("http://127.0.0.1:8000/connect", timeout=2.0)
-                if resp.status_code == 200:
-                    self._connected = True
-                    self.start_worker()
-                else:
-                    QMessageBox.warning(self, "Connect Failed", f"Server returned {resp.status_code}")
-                    return
-            except Exception as e:
-                QMessageBox.critical(self, "Connect Error", str(e))
-                return
+        """Starts or stops the fake telemetry timer."""
+        if not self.is_connected:
+            self.dev_timer.start()
+            self.is_connected = True
+            self.btn_connect.setText("DISCONNECT")
+            self.btn_connect.setObjectName("DisconnectButton")
+            self.messages.add_message(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Fake telemetry stream started.")
         else:
-            # disconnect
-            try:
-                requests.post("http://127.0.0.1:8000/disconnect", timeout=2.0)
-            except Exception:
-                pass
-            self._connected = False
-            self.stop_worker()
-
-        self.update_connect_button_style()
-
-    def start_worker(self):
-        if self.worker and self.worker.isRunning():
-            return
-        self.worker = TelemetryWorker(telemetry_url="http://127.0.0.1:8000/telemetry", poll_interval=0.33)
-        self.worker.telemetry_received.connect(self.update_telemetry_ui)
-        self.worker.error.connect(self.on_worker_error)
-        self.worker.start()
-
-    def stop_worker(self):
-        if self.worker:
-            try:
-                self.worker.stop()
-            except Exception:
-                pass
-            self.worker = None
-
-    @Slot(dict)
-    def update_telemetry_ui(self, data: dict):
-        """
-        Receives telemetry dict from worker and updates HUD, labels, messages and camera.
-        Now expects optional 'video_frame_bytes' in the dict (provided by worker).
-        """
-        # If error packet
-        if "error" in data:
-            self.prepend_message(f"{time.strftime('%H:%M:%S')} [ERROR] {data.get('error')}")
-            return
-
-        # Parse numeric telemetry safely
-        roll = float(data.get("roll", 0.0))
-        pitch = float(data.get("pitch", 0.0))
-        yaw = float(data.get("yaw", 0.0))
-        battery = data.get("battery", None)
-        altitude = data.get("altitude", None)
-        signal = data.get("signal", None)
-        cpu_temp = data.get("cpu_temp", None)
-        timestamp = data.get("timestamp", "")
-        # update HUD
-        try:
-            self.hud_widget.update_hud(roll, pitch, yaw)
-        except Exception:
-            traceback.print_exc()
-
-        # update telemetry label
-        batt_text = f"{battery:.1f}%" if isinstance(battery, (float, int)) else str(battery)
-        self.telemetry_label.setText(f"#Pitch: {pitch:.1f}°, Roll: {roll:.1f}°, Yaw: {yaw:.1f}°  |  Battery: {batt_text}  | Alt: {altitude}m")
-
-        # handle messages: list of strings
-        msgs = data.get("messages", [])
-        if isinstance(msgs, list) and msgs:
-            for m in msgs:
-                self.prepend_message(m)
-
-        # handle video frame bytes (non-blocking UI)
-        video_bytes = data.get("video_frame_bytes", None)
-        if video_bytes:
-            try:
-                pix = QPixmap()
-                pix.loadFromData(video_bytes)
-                # scale to the current label size but allow expansion
-                scaled = pix.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.video_label.setPixmap(scaled)
-            except Exception:
-                # keep previous pixmap or "No Video"
-                traceback.print_exc()
-
-    @Slot(str)
-    def on_worker_error(self, message: str):
-        # Show once per error (don't spam)
-        self.prepend_message(f"{time.strftime('%H:%M:%S')} [NET-ERR] {message}")
-
-    def prepend_message(self, msg: str):
-        """
-        Prepend message to the top of the messages box.
-        """
-        existing = self.messages_edit.toPlainText()
-        if existing:
-            new_text = msg + "\n" + existing
-        else:
-            new_text = msg
-        self.messages_edit.setPlainText(new_text)
-
-    def send_command(self, command: str):
-        """
-        Sends a POST to /command with { "command": "<COMMAND>" }
-        """
-        try:
-            resp = requests.post("http://127.0.0.1:8000/command", json={"command": command}, timeout=2.0)
-            if resp.status_code != 200:
-                self.prepend_message(f"{time.strftime('%H:%M:%S')} [CMD-ERR] {command} -> HTTP {resp.status_code}")
-            else:
-                try:
-                    data = resp.json()
-                    self.prepend_message(f"{time.strftime('%H:%M:%S')} [CMD] {command} -> {data}")
-                except Exception:
-                    self.prepend_message(f"{time.strftime('%H:%M:%S')} [CMD] {command} -> OK")
-        except Exception as e:
-            self.prepend_message(f"{time.strftime('%H:%M:%S')} [CMD-ERR] {command} -> {e}")
+            self.dev_timer.stop()
+            self.is_connected = False
+            self.btn_connect.setText("CONNECT")
+            self.btn_connect.setObjectName("ConnectButton")
+            self.messages.add_message(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Fake telemetry stream stopped.")
+        
+        # Re-apply stylesheet to update button color
+        self.apply_stylesheet()
+    
+    @Slot()
+    def _update_fake_telemetry(self):
+        """Generates fake data and updates all UI widgets."""
+        # 1. Generate Fake Data
+        data = {
+            "roll": random.uniform(-25.0, 25.0),
+            "pitch": random.uniform(-15.0, 15.0),
+            "yaw": random.uniform(0, 360),
+            "battery": max(0, 99.0 - (random.random() * 5)),
+            "signal": random.randint(70, 100),
+            "altitude": random.uniform(0.0, 50.0)
+        }
+        
+        # 2. Update HUD
+        self.hud.update_hud(data['roll'], data['pitch'], data['yaw'])
+        
+        # 3. Update Telemetry Panel
+        self.telemetry.update_data(data)
 
     def closeEvent(self, event):
-        # ensure worker stopped
-        try:
-            self.stop_worker()
-        except Exception:
-            pass
+        """Ensure the timer stops when the app closes."""
+        self.dev_timer.stop()
         event.accept()
 
-
-# ---------------------------
-# App Entrypoint
-# ---------------------------
-def main():
+# ---------------------------------
+# MAIN EXECUTION
+# ---------------------------------
+if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()
